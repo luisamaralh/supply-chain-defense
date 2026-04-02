@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: osv-sync-job
+spec:
+  schedule: "0 * * * *" # Every hour
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: osv-sync
+            image: osv-sync:latest # Built locally in Minishift
+            imagePullPolicy: IfNotPresent
+            envFrom:
+            - secretRef:
+                name: supply-chain-secrets
+            env:
+            - name: PGHOST
+              value: "postgres-db"
+            - name: PGPORT
+              value: "5432"
+          restartPolicy: OnFailure

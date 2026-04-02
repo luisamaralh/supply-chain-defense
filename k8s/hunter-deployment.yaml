@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hunter-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hunter-service
+  template:
+    metadata:
+      labels:
+        app: hunter-service
+    spec:
+      containers:
+      - name: hunter
+        image: hunter-service:latest
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - secretRef:
+            name: supply-chain-secrets
+        ports:
+        - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hunter-service
+spec:
+  selector:
+    app: hunter-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
