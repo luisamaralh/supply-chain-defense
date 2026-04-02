@@ -1,11 +1,11 @@
 import os
 import zipfile
 import tempfile
+import shutil
 import json
 import logging
 import requests
 import psycopg2
-from io import BytesIO
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,12 +13,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 OSV_ALL_URL = "https://osv-vulnerabilities.storage.googleapis.com/all.zip"
 
 def get_db_connection():
+    password = os.environ.get("POSTGRES_PASSWORD")
+    if not password:
+        raise RuntimeError("POSTGRES_PASSWORD environment variable is not set")
     return psycopg2.connect(
         host=os.getenv("PGHOST", "localhost"),
         port=os.getenv("PGPORT", "5432"),
         database=os.getenv("POSTGRES_DB", "osv_db"),
         user=os.getenv("POSTGRES_USER", "osvuser"),
-        password=os.getenv("POSTGRES_PASSWORD", "CHANGE_ME")
+        password=password
     )
 
 def download_and_extract_osv_data():
@@ -88,6 +91,7 @@ def sync_data(temp_dir):
     logging.info(f"Finished ingesting {count} records.")
 
 def main():
+    temp_dir = None
     try:
         temp_dir = download_and_extract_osv_data()
         sync_data(temp_dir)
@@ -95,6 +99,10 @@ def main():
     except Exception as e:
         logging.error(f"Sync failed: {e}")
         exit(1)
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            logging.info(f"Cleaned up temp directory: {temp_dir}")
 
 if __name__ == "__main__":
     main()

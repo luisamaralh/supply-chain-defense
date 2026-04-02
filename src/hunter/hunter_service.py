@@ -1,7 +1,7 @@
 import os
 import logging
 import requests
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
@@ -21,12 +21,15 @@ app.add_middleware(
 )
 
 def get_db_connection():
+    password = os.environ.get("POSTGRES_PASSWORD")
+    if not password:
+        raise RuntimeError("POSTGRES_PASSWORD environment variable is not set")
     return psycopg2.connect(
         host=os.getenv("PGHOST", "postgres-db"),
         port=os.getenv("PGPORT", "5432"),
         database=os.getenv("POSTGRES_DB", "osv_db"),
         user=os.getenv("POSTGRES_USER", "osvuser"),
-        password=os.getenv("POSTGRES_PASSWORD", "CHANGE_ME")
+        password=password
     )
 
 # ----------------- Configurations -----------------
@@ -179,14 +182,20 @@ async def health_check():
     return {"status": "healthy"}
 
 @app.get("/api/vulnerabilities/recent", response_model=RecentVulnerabilitiesResponse, tags=["Dashboard"], summary="List recent vulnerabilities", description="Retrieve paginated malware intelligence with dynamic text search over package names.")
-async def get_recent_vulnerabilities(page: int = 1, limit: int = 10, search: str = None):
+async def get_recent_vulnerabilities(
+    page: int = 1,
+    limit: int = 10,
+    search: str | None = Query(default=None, max_length=100)
+):
+    conn = None
+    cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
         offset = (page - 1) * limit
         
-        # Build counting query First
+        # Build counting query
         count_query = "SELECT COUNT(*) FROM osv_vulnerabilities"
         count_params = []
         if search:
@@ -211,9 +220,6 @@ async def get_recent_vulnerabilities(page: int = 1, limit: int = 10, search: str
         
         cur.execute(query, tuple(params))
         rows = cur.fetchall()
-        
-        cur.close()
-        conn.close()
         
         results = []
         for row in rows:
@@ -241,13 +247,19 @@ async def get_recent_vulnerabilities(page: int = 1, limit: int = 10, search: str
     except Exception as e:
         logger.error(f"Error fetching recent: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 @app.get("/api/vulnerabilities/stats", response_model=StatsResponse, tags=["Dashboard"], summary="Malware Ecosystem Statistics")
 async def get_vulnerability_stats():
+    conn = None
+    cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Group by ecosystem
         cur.execute("""
             SELECT data->'affected'->0->'package'->>'ecosystem' AS ecosystem, COUNT(*) 
             FROM osv_vulnerabilities
@@ -255,11 +267,13 @@ async def get_vulnerability_stats():
             ORDER BY COUNT(*) DESC;
         """)
         rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        
         stats = [{"ecosystem": row[0] or "Unknown", "count": row[1]} for row in rows]
         return {"status": "success", "data": stats}
     except Exception as e:
         logger.error(f"Error fetching stats: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
