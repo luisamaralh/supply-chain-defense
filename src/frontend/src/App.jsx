@@ -6,6 +6,10 @@ import {
 } from 'recharts';
 import './index.css';
 
+// In Docker Compose the Nginx proxy routes /api -> hunter-service, so the base is ''.
+// For local Minikube port-forward, set VITE_API_URL=http://127.0.0.1:8000 in .env.local
+const API_BASE = import.meta.env.VITE_API_URL ?? '';
+
 function App() {
   const [recentMalware, setRecentMalware] = useState([]);
   const [stats, setStats] = useState([]);
@@ -33,15 +37,15 @@ function App() {
       setLoading(true);
       try {
         const [recentRes, statsRes] = await Promise.all([
-          axios.get(`http://127.0.0.1:8000/api/vulnerabilities/recent?page=${page}&limit=10&search=${debouncedSearch}`),
-          axios.get('http://127.0.0.1:8000/api/vulnerabilities/stats')
+          axios.get(`${API_BASE}/api/vulnerabilities/recent?page=${page}&limit=10&search=${debouncedSearch}`),
+          axios.get(`${API_BASE}/api/vulnerabilities/stats`)
         ]);
         setRecentMalware(recentRes.data.data);
         setPagination(recentRes.data.pagination);
         setStats(statsRes.data.data);
         setError(null);
       } catch (err) {
-        setError('Failed to connect to Hunter Service API. Ensure port-forwarding is active (kubectl port-forward svc/hunter-service 8000:80).');
+        setError('Failed to connect to Hunter Service API. In Docker Compose, ensure all services are running (docker compose ps). For Minikube, set VITE_API_URL=http://127.0.0.1:8000 in src/frontend/.env.local and rebuild.');
         console.error(err);
       } finally {
         setLoading(false);
