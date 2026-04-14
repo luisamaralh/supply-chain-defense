@@ -1,61 +1,158 @@
 # Supply Chain Defense Pipeline
 
-This repository contains the logic and infrastructure manifests for a supply chain attack defense system, powered by OSV (Open Source Vulnerabilities) data and hunting integrations via JFrog Artifactory and CrowdStrike Falcon.
+An automated, full-stack supply chain security monitoring system. It ingests malware data from the [OSV database](https://osv.dev), stores it in PostgreSQL, and exposes a modern React dashboard and a FastAPI webhook service that triggers threat hunting in JFrog Artifactory and CrowdStrike Falcon.
+
+## Architecture
+
+```
+OSV (all.zip)
+     │
+     ▼
+[osv-sync] ──► PostgreSQL (JSONB) ◄── [hunter-service API]
+                                               │
+                                         [frontend]
+                                    (React + Nginx proxy)
+```
 
 ## Project Structure
 
-- `db/`: Contains the initialization SQL for the PostgreSQL database which stores OSV records using `JSONB`.
-- `k8s/`: Contains the Openshift/Kubernetes manifests for deploying the system.
-- `src/sync/`: Python CronJob application that runs hourly, downloading all vulnerability history from `gs://osv-vulnerabilities/all.zip` and pushing it to the PostgreSQL DB.
-- `src/hunter/`: FastAPI service designed to receive threat intelligence alerts (triggering searches in JFrog Artifactory and CrowdStrike) and serve vulnerability data out to the Frontend.
-- `src/frontend/`: React + Vite Frontend application providing an aesthetic dashboard for OSINT data, featuring dynamic JSONB filtering and pagination.
+| Path | Description |
+|---|---|
+| `db/` | PostgreSQL init SQL — schema + GIN indexes |
+| `k8s/` | Kubernetes manifests (Minikube / K3s) |
+| `src/sync/` | Python CronJob — hourly OSV malware ingestion |
+| `src/hunter/` | FastAPI — REST API, Swagger docs, JFrog/CrowdStrike webhooks |
+| `src/frontend/` | React + Vite dashboard — paginated table, search, ecosystem chart |
+| `docker-compose.yml` | Single-file Docker Compose stack for server deployment |
+| `.env.example` | Template for all secrets — copy to `.env` before deploying |
 
-## Getting Started Locally (Minikube)
+---
 
-We have provided automated scripts to help you deploy the system on a local Minikube cluster.
+## 🐳 Deployment: Docker Compose (Recommended for Servers)
 
-### 1. Configure Secrets
-Before deploying, edit the `k8s/secrets-template.yaml` file to include your actual API tokens and passwords for Artifactory and Falcon.
+The simplest path for deploying on a Linux server (Oracle Linux, RHEL, Ubuntu, etc.).
 
-### 2. Initialization and Building
-Ensure you have Minikube installed (e.g. `brew install minikube`). 
-Run the setup script which will automatically start Minikube, configure the namespaces, and build the Docker images for the pipeline directly in the cluster's environment:
+### Prerequisites
 ```bash
-./setup.sh
+sudo dnf install -y docker-ce docker-ce-cli docker-compose-plugin gettext
+sudo systemctl enable --now docker
 ```
 
-### 3. Deploy Infrastructure
-Once the setup is complete, you can deploy the PostgreSQL database, the `osv-sync` CronJob, the `hunter` REST/Webhook service, and the `frontend` Dashboard Application using the run script:
+### 1. Clone and configure
 ```bash
-./run.sh
+git clone https://github.com/luisamaralh/supply-chain-defense.git
+cd supply-chain-defense
+
+# Create your secrets file from the template
+cp .env.example .env
+nano .env   # Fill in POSTGRES_PASSWORD, JFROG_TOKEN, CS_CLIENT_ID, CS_CLIENT_SECRET
 ```
 
-### 4. Access the Frontend Dashboard
-To interact with the OSINT data via the rich browser dashboard, use `kubectl port-forward` to map the services to your local machine:
+### 2. Build and start
 ```bash
-# Terminal 1 - The Backend API
-kubectl port-forward svc/hunter-service 8000:80
+./setup.sh    # Builds all Docker images
+./run.sh      # Starts all services with docker compose up -d
+```
 
-# Terminal 2 - The Frontend React UI
+### 3. Run the initial data sync
+Downloads and indexes malware records from OSV into the database (~10–20 min):
+```bash
+docker compose run --rm osv-sync
+```
+
+### 4. Access the stack
+
+| Service | URL |
+|---|---|
+| **Dashboard** | `http://<server-ip>/` |
+| **Hunter REST API** | `http://<server-ip>/api/` |
+| **Swagger UI** | `http://<server-ip>/api/docs` |
+
+> The Nginx container automatically proxies `/api/` and `/webhook/` to the hunter-service — no extra port exposure needed.
+
+### 5. Schedule hourly sync
+```bash
+crontab -e
+# Add:
+0 * * * * docker compose -f /path/to/supply-chain-defense/docker-compose.yml run --rm osv-sync
+```
+
+### Useful commands
+```bash
+docker compose ps                       # Status of all services
+docker compose logs -f hunter-service   # Stream API logs
+docker compose logs -f osv-sync         # Check last sync run
+docker compose restart hunter-service   # Restart a service
+docker compose down                     # Stop everything
+```
+
+---
+
+## ☸️ Deployment: Minikube (Local Development)
+
+### Prerequisites
+- Minikube (`brew install minikube`)
+- `gettext` for `envsubst` (`brew install gettext`)
+
+### 1. Configure secrets
+```bash
+cp .env.example .env
+nano .env  # Fill in your secrets
+```
+
+### 2. Build images and start cluster
+```bash
+./setup.sh --minikube   # Starts Minikube, builds all 3 Docker images into its daemon
+./run.sh --minikube     # Applies K8s manifests, secrets rendered from .env via envsubst
+```
+
+### 3. Access the dashboard
+```bash
+# Terminal 1
+kubectl port-forward svc/hunter-service 8000:8000
+
+# Terminal 2
 kubectl port-forward svc/frontend 3000:80
 ```
-Then navigate to `http://127.0.0.1:3000` in your web browser!
 
-### 5. Triggering the Hunter Service
-You can mock an alert by port-forwarding the `hunter-service` Service and sending a cURL POST request:
+Then set `VITE_API_URL=http://127.0.0.1:8000` in `src/frontend/.env.local` and rebuild,
+or open `http://127.0.0.1:3000` (the dashboard will show a connection error banner if the API is unreachable).
+
+### Monitor the sync CronJob
 ```bash
-kubectl port-forward svc/hunter-service 8000:80
+# Check last scheduled run
+kubectl get cronjob osv-sync-job
 
+# Trigger a manual sync
+kubectl create job osv-sync-manual --from=cronjob/osv-sync-job
+kubectl logs -f -l job-name=osv-sync-manual
+
+# Query the database directly
+kubectl exec -it $(kubectl get pod -l app=postgres-db -o name) -- \
+  psql -U osvuser -d osv_db -c "SELECT COUNT(*) FROM osv_vulnerabilities;"
+```
+
+### Trigger a webhook hunt
+```bash
 curl -X POST http://127.0.0.1:8000/webhook/malware \
      -H "Content-Type: application/json" \
-     -d '{"vulnerability_id": "GHSA-1234", "package_name": "log4j", "version": "2.14.0", "ecosystem": "Maven"}'
-```
-You can view the logs to see the Artifactory and CrowdStrike hunting processes running:
-```bash
-kubectl logs -f deployment/hunter-service
+     -d '{"vulnerability_id": "MAL-1234", "package_name": "malicious-pkg", "version": "1.0.0", "ecosystem": "npm"}'
 ```
 
-### 6. Interactive API Documentation (Swagger UI)
-Because the `hunter-service` is built with FastAPI, comprehensive interactive Swagger documentation is generated automatically out of the box. 
-Once you have port-forwarded `svc/hunter-service 8000:80` as shown above, you can access the full API Schema and test the endpoints directly by navigating to:
-**http://127.0.0.1:8000/docs**
+---
+
+## Dashboard Features
+
+- **Ecosystem Compromises chart** — bar chart grouped by package ecosystem (npm, PyPI, Go, etc.)
+- **Malware table** — paginated (10 per page), with debounced free-text search by package name
+- **Expandable rows** — click any row to reveal affected versions, ecosystem badge, and OSV summary
+- **Hunt button** — triggers the JFrog / CrowdStrike webhook for a specific record
+- **Swagger UI** — interactive API docs auto-generated by FastAPI
+
+---
+
+## Security Notes
+
+- All secrets are loaded from `.env` at runtime — never commit this file (it is in `.gitignore`)
+- `k8s/secrets-template.yaml` uses `${VAR}` placeholders rendered via `envsubst` — safe to commit
+- Python dependencies are audited with `pip-audit`; the `requests` library is pinned to `>=2.33.0` to address CVE-2024-35195, CVE-2024-47081, and CVE-2026-25645

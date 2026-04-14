@@ -1,0 +1,87 @@
+services:
+
+  # ── PostgreSQL Database ────────────────────────────────────────────────────
+  postgres-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - supply-chain-net
+
+  # ── OSV Sync (runs once, then hourly via cron or manual trigger) ───────────
+  osv-sync:
+    build:
+      context: ./src/sync
+    restart: "no"
+    environment:
+      PGHOST:            postgres-db
+      PGPORT:            "5432"
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    networks:
+      - supply-chain-net
+
+  # ── Hunter / API Service ───────────────────────────────────────────────────
+  hunter-service:
+    build:
+      context: ./src/hunter
+    restart: unless-stopped
+    environment:
+      PGHOST:            postgres-db
+      PGPORT:            "5432"
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      JFROG_URL:         ${JFROG_URL}
+      JFROG_USER:        ${JFROG_USER}
+      JFROG_TOKEN:       ${JFROG_TOKEN}
+      CS_CLIENT_ID:      ${CS_CLIENT_ID}
+      CS_CLIENT_SECRET:  ${CS_CLIENT_SECRET}
+      CS_BASE_URL:       ${CS_BASE_URL}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - supply-chain-net
+
+  # ── React Frontend (Nginx) ─────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./src/frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - hunter-service
+    networks:
+      - supply-chain-net
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  supply-chain-net:
+    driver: bridge

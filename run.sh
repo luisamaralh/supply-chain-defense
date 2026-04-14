@@ -1,42 +1,93 @@
 #!/bin/bash
 set -e
 
-echo "=> Setting Kubernetes context to supply-chain-defense namespace..."
-kubectl config set-context --current --namespace=supply-chain-defense
+# ── Usage ─────────────────────────────────────────────────────────────────────
+# ./run.sh              → Docker Compose mode (default, recommended for servers)
+# ./run.sh --minikube   → Minikube / Kubernetes mode
+# ─────────────────────────────────────────────────────────────────────────────
 
-echo "=> Deploying Secrets..."
-kubectl apply -f k8s/secrets-template.yaml
+MODE="compose"
+if [[ "$1" == "--minikube" ]]; then
+    MODE="minikube"
+fi
 
-echo "=> Creating/Updating ConfigMap for postgres init scripts..."
-kubectl create configmap postgres-init-script --from-file=db/init.sql --dry-run=client -o yaml | kubectl apply -f -
+# ── Load .env ─────────────────────────────────────────────────────────────────
+ENV_FILE="$(dirname "$0")/.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+else
+    echo "ERROR: .env file not found."
+    echo "       Copy .env.example to .env and fill in your secrets."
+    exit 1
+fi
 
-echo "=> Deploying PostgreSQL Database..."
-kubectl apply -f k8s/postgres-pvc.yaml
-kubectl apply -f k8s/postgres-deployment.yaml
+# ══════════════════════════════════════════════════════════════════════════════
+if [[ "$MODE" == "compose" ]]; then
+# ══════════════════════════════════════════════════════════════════════════════
 
-echo "=> Deploying OSV Sync CronJob..."
-kubectl apply -f k8s/osv-sync-cronjob.yaml
+    echo "=> [Docker Compose] Starting all services..."
+    docker compose up -d
 
-echo "=> Deploying Hunter Service..."
-kubectl apply -f k8s/hunter-deployment.yaml
+    echo ""
+    echo "--------------------------------------------------------"
+    echo "All services are up!"
+    echo ""
+    echo "  Dashboard : http://localhost/"
+    echo "  API       : http://localhost/api/"
+    echo "  Swagger   : http://localhost/api/docs"
+    echo ""
+    echo "Run the first OSV data sync:"
+    echo "  docker compose run --rm osv-sync"
+    echo ""
+    echo "Check service status:"
+    echo "  docker compose ps"
+    echo "  docker compose logs -f"
+    echo "--------------------------------------------------------"
 
-echo "=> Deploying Frontend Dashboard..."
-kubectl apply -f k8s/frontend-deployment.yaml
+# ══════════════════════════════════════════════════════════════════════════════
+elif [[ "$MODE" == "minikube" ]]; then
+# ══════════════════════════════════════════════════════════════════════════════
 
-echo "--------------------------------------------------------"
-echo "Deployment applied! It may take a minute for pods to spin up."
-echo "Check the status with:"
-echo "  kubectl get pods -w"
-echo ""
-echo "Once the hunter-service pod is running, open access to the API:"
-echo "  kubectl port-forward svc/hunter-service 8000:80"
-echo ""
-echo "And open access to the Frontend Dashboard UI in a separate terminal:"
-echo "  kubectl port-forward svc/frontend 3000:80"
-echo "  Open your browser to http://127.0.0.1:3000"
-echo ""
-echo "Then, trigger a webhook using:"
-echo "  curl -X POST http://127.0.0.1:8000/webhook/malware \\"
-echo "       -H 'Content-Type: application/json' \\"
-echo "       -d '{\"vulnerability_id\": \"GHSA-test\", \"package_name\": \"test-pkg\", \"version\": \"1.0\", \"ecosystem\": \"npm\"}'"
-echo "--------------------------------------------------------"
+    echo "=> [Minikube] Setting Kubernetes context..."
+    kubectl config set-context --current --namespace=supply-chain-defense
+
+    echo "=> [Minikube] Deploying Secrets (rendered from .env)..."
+    envsubst < k8s/secrets-template.yaml | kubectl apply -f -
+
+    echo "=> [Minikube] Creating ConfigMap for postgres init scripts..."
+    kubectl create configmap postgres-init-script --from-file=db/init.sql --dry-run=client -o yaml | kubectl apply -f -
+
+    echo "=> [Minikube] Deploying PostgreSQL..."
+    kubectl apply -f k8s/postgres-pvc.yaml
+    kubectl apply -f k8s/postgres-deployment.yaml
+
+    echo "=> [Minikube] Deploying OSV Sync CronJob..."
+    kubectl apply -f k8s/osv-sync-cronjob.yaml
+
+    echo "=> [Minikube] Deploying Hunter Service..."
+    kubectl apply -f k8s/hunter-deployment.yaml
+
+    echo "=> [Minikube] Deploying Frontend..."
+    kubectl apply -f k8s/frontend-deployment.yaml
+
+    echo ""
+    echo "--------------------------------------------------------"
+    echo "Deployment applied! Wait for pods to be Ready:"
+    echo "  kubectl get pods -w"
+    echo ""
+    echo "Then open port-forwards in two terminals:"
+    echo "  kubectl port-forward svc/hunter-service 8000:8000"
+    echo "  kubectl port-forward svc/frontend 3000:80"
+    echo ""
+    echo "  Dashboard : http://127.0.0.1:3000"
+    echo "  Swagger   : http://127.0.0.1:8000/docs"
+    echo ""
+    echo "Trigger a test webhook:"
+    echo "  curl -X POST http://127.0.0.1:8000/webhook/malware \\"
+    echo "       -H 'Content-Type: application/json' \\"
+    echo "       -d '{\"vulnerability_id\": \"MAL-test\", \"package_name\": \"test-pkg\", \"version\": \"1.0\", \"ecosystem\": \"npm\"}'"
+    echo "--------------------------------------------------------"
+
+fi

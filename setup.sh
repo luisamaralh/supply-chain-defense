@@ -1,41 +1,73 @@
 #!/bin/bash
 set -e
 
-echo "=> Checking if minikube is installed..."
-if ! command -v minikube &> /dev/null; then
-    echo "ERROR: minikube is not installed."
-    echo "You can install it using Homebrew on macOS: 'brew install minikube'"
+# ── Usage ─────────────────────────────────────────────────────────────────────
+# ./setup.sh            → Docker Compose mode (default, recommended for servers)
+# ./setup.sh --minikube → Minikube mode (local Kubernetes development)
+# ─────────────────────────────────────────────────────────────────────────────
+
+MODE="compose"
+if [[ "$1" == "--minikube" ]]; then
+    MODE="minikube"
+fi
+
+# ── Load .env ─────────────────────────────────────────────────────────────────
+ENV_FILE="$(dirname "$0")/.env"
+if [ -f "$ENV_FILE" ]; then
+    echo "=> Loading environment from .env..."
+    set -a
+    source "$ENV_FILE"
+    set +a
+else
+    echo "ERROR: .env file not found."
+    echo "       Copy .env.example to .env and fill in your secrets."
     exit 1
 fi
 
-echo "=> Starting minikube (this may take a minute)..."
-# Setting --driver=docker as it works best on Apple Silicon (M1/M2) and avoids hyperkit errors
-minikube start --driver=docker
+# ══════════════════════════════════════════════════════════════════════════════
+if [[ "$MODE" == "compose" ]]; then
+# ══════════════════════════════════════════════════════════════════════════════
 
-echo "=> Creating supply-chain-defense namespace..."
-kubectl create namespace supply-chain-defense --dry-run=client -o yaml | kubectl apply -f -
-kubectl config set-context --current --namespace=supply-chain-defense
+    echo "=> [Docker Compose] Building all images..."
+    docker compose build --no-cache
 
-echo "=> Configuring Docker environment to use Minikube's daemon..."
-eval "$(minikube -p minikube docker-env 2>/dev/null | grep '^export ')"
+    echo "--------------------------------------------------------"
+    echo "Build complete! Run './run.sh' to start all services."
+    echo "Or run './run.sh --compose' explicitly."
+    echo "--------------------------------------------------------"
 
-echo "=> Building Sync Application image locally..."
-cd src/sync
-docker build -t osv-sync:latest .
-# Build Hunter App
-echo "=> Building Hunter Application image locally..."
-cd ../hunter
-docker build -t hunter-service:latest .
+# ══════════════════════════════════════════════════════════════════════════════
+elif [[ "$MODE" == "minikube" ]]; then
+# ══════════════════════════════════════════════════════════════════════════════
 
-# Build Frontend App
-echo "=> Building Frontend Application image locally..."
-cd ../frontend
-docker build -t frontend-service:latest .
-cd ../../
+    echo "=> [Minikube] Checking if minikube is installed..."
+    if ! command -v minikube &> /dev/null; then
+        echo "ERROR: minikube is not installed."
+        echo "       Install with: brew install minikube"
+        exit 1
+    fi
 
-echo "--------------------------------------------------------"
-echo "Setup is mostly complete! However, before deploying,"
-echo "make sure to update 'k8s/secrets-template.yaml' with"
-echo "your actual API keys and tokens for Artifactory and Falcon."
-echo "--------------------------------------------------------"
-echo "When you're ready, execute './run.sh' to deploy everything."
+    echo "=> [Minikube] Starting cluster..."
+    minikube start --driver=docker
+
+    echo "=> [Minikube] Creating supply-chain-defense namespace..."
+    kubectl create namespace supply-chain-defense --dry-run=client -o yaml | kubectl apply -f -
+    kubectl config set-context --current --namespace=supply-chain-defense
+
+    echo "=> [Minikube] Pointing Docker CLI at Minikube's daemon..."
+    eval "$(minikube -p minikube docker-env 2>/dev/null | grep '^export ')"
+
+    echo "=> [Minikube] Building osv-sync image..."
+    docker build -t osv-sync:latest src/sync/
+
+    echo "=> [Minikube] Building hunter-service image..."
+    docker build -t hunter-service:latest src/hunter/
+
+    echo "=> [Minikube] Building frontend image..."
+    docker build -t frontend-service:latest src/frontend/
+
+    echo "--------------------------------------------------------"
+    echo "Build complete! Run './run.sh --minikube' to deploy."
+    echo "--------------------------------------------------------"
+
+fi
